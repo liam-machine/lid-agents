@@ -42,6 +42,7 @@ agents                 # status
 agents busy            # which agents count as busy (or need you), and in which folder
 agents wait 10         # a closed Mac stays awake 10 min for an agent that needs you (default 3)
 agents integrate       # let Lid Agents see when Codex and OpenCode are busy, and when an agent needs you
+agents remote on       # new Claude Code sessions connect to Remote Control, so you can answer from your phone
 agents hotkey ctrl+opt+cmd+l   # change the hotkey (or none); applies within seconds
 agents update          # install the latest release
 ```
@@ -81,6 +82,15 @@ An agent stopped on a permission prompt or a question isn't working: it's waitin
 
 The hooks run `agents mark` and do nothing else: they print nothing, always succeed, and are tagged `# lid-agents-hook`, so re-running `agents integrate` replaces them and `agents uninstall` removes them, leaving any other hooks alone. The first change to each file keeps a `.lid-agents.bak` copy next to it. An agent that's using CPU again, or has started a long-running command since the prompt, counts as busy straight away. Editing a settings file never replaces it: an unreadable or invalid file is left alone, a file that wouldn't change isn't rewritten, and its permissions are kept.
 
+## Answer from your phone
+
+Close the lid, walk away, and still answer an agent that needs you. Claude Code's [Remote Control](https://code.claude.com/docs/en/remote-control) connects a session on your Mac to [claude.ai/code](https://claude.ai/code) and the Claude app for iOS and Android, and the app gets a push when the agent stops on a permission prompt or a question. Lid Agents keeps the Mac awake for it (see the wait time above) and turns it on for you:
+
+- **Every new Claude Code session connects.** The cup → **Remote Control for new Claude sessions**, or `agents remote on`. `agents integrate` turns it on too, unless you've already chosen either way. It sets Claude Code's own `remoteControlAtStartup` (the same as **Enable Remote Control for all sessions** in `/config`) and, unless you've chosen otherwise, **Push when actions required** (`inputNeededNotifEnabled`). `agents remote off` or the same menu item turns it off for new sessions.
+- **Sessions that were already open are named.** Claude Code only connects a running session from inside it, so Lid Agents can't do it for you. When you switch keep on, the notification names any busy Claude session that isn't connected, and so do the cup's menu, `agents` and `agents remote`. Run `/remote-control` in each before you close the lid.
+
+Remote Control needs a claude.ai Pro, Max, Team or Enterprise plan (Team and Enterprise: an Owner switches it on), and the Mac needs its own internet connection while the lid is closed. A session only appears in your own account. Lid Agents tells connected sessions apart by a field in Claude Code's `~/.claude/sessions/<pid>.json`, which isn't documented, so if a Claude Code update changes it, the warning stays quiet rather than wrong.
+
 ## Why this needs a tool
 
 macOS has two kinds of sleep:
@@ -102,7 +112,7 @@ The one switch that covers the lid is `pmset -a disablesleep 1`. It is global an
 | "Allow notifications" prompt | Notifications when you switch, and when it pauses itself | System Settings → Notifications → Lid Agents |
 | Nothing else | The hotkey uses `RegisterEventHotKey`, which needs **no** Accessibility or Input Monitoring permission. | — |
 
-Files: `Lid Agents.app` (in `/Applications` from the DMG, `~/Applications` from the one-liner), the `agents` link in `~/.local/bin`, a login item in `~/Library/LaunchAgents/io.github.liam-machine.lid-agents.plist`, and a log in `~/.cache/lid-agents/`. `agents integrate`, which you run yourself, adds `~/.config/opencode/plugins/lid-agents.js`, sets `prevent_idle_sleep` in `~/.codex/config.toml`, and adds tagged hooks to `~/.claude/settings.json` and `~/.codex/hooks.json`. The app is built from this repo by GitHub Actions, signed with a Developer ID and notarized by Apple, so Gatekeeper opens it without warnings however you install it.
+Files: `Lid Agents.app` (in `/Applications` from the DMG, `~/Applications` from the one-liner), the `agents` link in `~/.local/bin`, a login item in `~/Library/LaunchAgents/io.github.liam-machine.lid-agents.plist`, and a log in `~/.cache/lid-agents/`. `agents integrate`, which you run yourself, adds `~/.config/opencode/plugins/lid-agents.js`, sets `prevent_idle_sleep` in `~/.codex/config.toml`, and adds tagged hooks to `~/.claude/settings.json` and `~/.codex/hooks.json`. It and `agents remote` also set `remoteControlAtStartup` and `inputNeededNotifEnabled` in `~/.claude/settings.json`, Claude Code settings that `agents uninstall` leaves as they are. The app is built from this repo by GitHub Actions, signed with a Developer ID and notarized by Apple, so Gatekeeper opens it without warnings however you install it.
 
 ## Settings
 

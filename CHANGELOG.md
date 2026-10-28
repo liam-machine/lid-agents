@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0
+
+- **Answer agents from your phone.** Lid Agents turns on Claude Code's own [Remote Control](https://code.claude.com/docs/en/remote-control) for new sessions, so with the lid closed you can answer a Claude session from claude.ai/code or the Claude app, which gets a push when it needs you. Turn it on or off under the cup → **Remote Control for new Claude sessions**, or with `agents remote on|off`. `agents integrate` turns it on unless you've already chosen. It sets `remoteControlAtStartup` and, unless you've chosen otherwise, `inputNeededNotifEnabled` in `~/.claude/settings.json`.
+- **Busy sessions your phone can't reach are named.** Claude Code only connects a session that's already running from inside it, so when you switch keep on, the notification lists any busy Claude session that isn't on Remote Control, and so do the cup's menu, `agents` and `agents remote`. Run `/remote-control` in each before you close the lid.
+
 ## 1.2.0
 
 - **Lid Agents knows when an agent needs you.** An agent stopped on a permission prompt or a question shows as **needs input** in `agents busy` and the cup's **Busy agents** menu (after busy agents). Run `agents integrate` to set it up:
