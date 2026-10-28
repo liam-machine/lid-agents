@@ -10,7 +10,7 @@
 #   agents                        status
 #   agents busy                   which agent processes count as busy (or need you) right now
 #   agents wait [minutes]         how long a closed Mac stays awake for an agent that needs you
-#                                 (default 3; also under the cup → When an agent needs you)
+#                                 (default 3; also the cup → Settings → Wait for your answer)
 #   agents remote [on|off]        Claude Code's Remote Control for new sessions, so you can answer
 #                                 them from your phone; lists busy sessions that aren't connected
 #   agents hotkey [keys|none]     show or set the hotkey, e.g. agents hotkey ctrl+opt+cmd+l
@@ -44,6 +44,7 @@ BUNDLE_ID="io.github.liam-machine.lid-agents"
 
 STATE_DIR="$HOME/.cache/lid-agents"
 GUARD_PID="$STATE_DIR/guard.pid"
+KEEP_MODE="$STATE_DIR/keep-mode"               # busy or always: what the last `agents keep` chose
 LOG="$STATE_DIR/lid-agents.log"
 SUDOERS_FILE="/etc/sudoers.d/lid-agents"
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
@@ -70,7 +71,7 @@ NEW_CHILD_SECONDS=10
 HOOK_FILES="$STATE_DIR/hook-files"             # every settings/hooks file integrate edited
 
 # Minutes a closed Mac stays awake for an agent that needs input. Read on every guard pass, so
-# the menu bar's "When an agent needs you" choice applies to a keep that's already running.
+# the menu bar's "Wait for your answer" choice applies to a keep that's already running.
 wait_minutes() {
   local v="${AGENTS_WAIT_MINUTES:-}"
   [ -n "$v" ] || v="$(defaults read "$BUNDLE_ID" WaitMinutes 2>/dev/null)"
@@ -343,6 +344,7 @@ cmd_keep() {
   set_flag 1 || exit 1
   stop_guard
   start_guard "$mode" "$hours"
+  echo "$mode" > "$KEEP_MODE"
   log "keep (mode=$mode, cap=${hours}h, floor=${MIN_BATTERY}%)"
 
   local cap="cap ${hours}h"; [ "$hours" = "0" ] && cap="no cap"
@@ -405,13 +407,34 @@ cmd_status() {
   if [ -f "$LOG" ]; then echo "  last:    $(tail -1 "$LOG")"; fi
 }
 
+# The keep mode cmd_keep last started: busy (while agents work) or always (whether or not)
+keep_mode() { cat "$KEEP_MODE" 2>/dev/null || echo busy; }
+
 # One machine-readable line for the menu bar app:
 #   <keep|pause> <busy> <guard 0|1> <battery%> <ac|battery> <open|closed> <setup ok|missing> <idle minutes>
+#   <busy|always>
+# --menu adds, from the same agent report, what the menu lists:
+#   remote <on|off|none>              Remote Control for new Claude sessions (none: no Claude Code here)
+#   agent <pid> <name> <working|waiting> <yes|no|-> <folder>   yes|no: a Claude session on Remote Control
 cmd_state() {
-  printf '%s %s %s %s %s %s %s %s\n' \
-    "$(keeping && echo keep || echo pause)" "$(busy_count)" "$(guard_running && echo 1 || echo 0)" \
-    "$(battery_pct)" "$(on_battery && echo battery || echo ac)" "$(lid_closed && echo closed || echo open)" \
-    "$(has_sudo_rule && echo ok || echo missing)" "$IDLE_MINUTES"
+  local report; report="$(agent_report)"
+  printf '%s %s %s %s %s %s %s %s %s\n' \
+    "$(keeping && echo keep || echo pause)" "$(printf '%s\n' "$report" | awk 'NF && $3 " " $4 != "needs input"' | wc -l | tr -d ' ')" \
+    "$(guard_running && echo 1 || echo 0)" "$(battery_pct)" "$(on_battery && echo battery || echo ac)" \
+    "$(lid_closed && echo closed || echo open)" "$(has_sudo_rule && echo ok || echo missing)" "$IDLE_MINUTES" "$(keep_mode)"
+  [ "${1:-}" = "--menu" ] || return 0
+  local remote="none" sessions="" pid name why1 why2 state phone
+  if [ -d "$(dirname "$(claude_settings_file)")" ]; then
+    remote="$(remote_on && echo on || echo off)"
+    sessions="$(remote_sessions "$report")"
+  fi
+  echo "remote $remote"
+  printf '%s\n' "$report" | while read -r pid name why1 why2 _; do
+    [ -n "$pid" ] || continue
+    state=working; [ "$why1 $why2" = "needs input" ] && state=waiting
+    phone="$(printf '%s\n' "$sessions" | awk -v p="$pid" '$1 == p { print $2 }')"
+    echo "agent $pid $name $state ${phone:--} $(agent_folder "$pid")"
+  done
 }
 
 agent_folder() { lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'; }
@@ -757,19 +780,24 @@ claude_settings_file() {
 
 remote_on() { [ "$(plutil -extract remoteControlAtStartup raw -o - "$(claude_settings_file)" 2>/dev/null)" = "true" ]; }
 
-# "pid folder" per busy Claude Code session (or one that needs input) not on Remote Control. Claude
+# "pid yes|no" per busy Claude Code session (or one that needs input): is it on Remote Control? Claude
 # Code keeps a sessions/<pid>.json per running session, with a bridgeSessionId while it's connected.
 # That file is undocumented, so a session without one (an older version) is left out, not flagged.
-remote_missing() {   # remote_missing [agent report]
+remote_sessions() {   # remote_sessions [agent report]
   local report="${1-$(agent_report)}" dir pid name f
   dir="$(dirname "$(claude_settings_file)")/sessions"
   printf '%s\n' "$report" | while read -r pid name _; do
     [ "$name" = "claude" ] && [ -f "$dir/$pid.json" ] || continue
     f="$dir/$pid.json"
     [ "$(plutil -extract kind raw -o - "$f" 2>/dev/null)" = "interactive" ] || continue
-    plutil -extract bridgeSessionId raw -o - "$f" >/dev/null 2>&1 && continue
-    echo "$pid $(agent_folder "$pid")"
+    if plutil -extract bridgeSessionId raw -o - "$f" >/dev/null 2>&1; then echo "$pid yes"; else echo "$pid no"; fi
   done
+}
+
+# "pid folder" per busy Claude Code session that isn't on Remote Control
+remote_missing() {   # remote_missing [agent report]
+  local pid
+  remote_sessions "$@" | awk '$2 == "no" { print $1 }' | while read -r pid; do echo "$pid $(agent_folder "$pid")"; done
 }
 
 # "claude in a, claude in b": the busy sessions remote_missing printed
@@ -793,12 +821,6 @@ cmd_remote() {
       log "remote control: off"
       echo "Remote Control: off for new Claude Code sessions. Connected ones stay on until you run /remote-control in them."
       return 0 ;;
-    --state)
-      # For the menu bar app: on|off|none, then remote_missing's lines
-      if [ ! -d "$(dirname "$file")" ]; then echo none; return 0; fi
-      remote_on && echo on || echo off
-      remote_missing
-      return 0 ;;
     "")
       if remote_on; then
         echo "Remote Control: on for new Claude Code sessions"
@@ -817,12 +839,12 @@ cmd_remote() {
 }
 
 # agents wait [minutes]: how long a closed Mac stays awake for an agent that needs input.
-# The same setting as the menu bar's "When an agent needs you"; a running keep picks it up.
+# The same setting as the menu bar's "Wait for your answer"; a running keep picks it up.
 cmd_wait() {
   local m="${1:-}"
   if [ -z "$m" ]; then
     echo "A closed Mac stays awake $(wait_minutes) min for an agent that needs you, then sleeps."
-    echo "  change it: agents wait 10   (minutes; also under the cup → When an agent needs you)"
+    echo "  change it: agents wait 10   (minutes; also the cup → Settings → Wait for your answer)"
     return 0
   fi
   m="${m%m}"; m="${m%min}"
@@ -936,7 +958,7 @@ case "${1:-status}" in
   pause|off)  cmd_pause ;;
   toggle)     if keeping; then cmd_pause; else shift; cmd_keep "$@"; fi ;;
   status)     cmd_status ;;
-  state)      cmd_state ;;
+  state)      shift; cmd_state "$@" ;;
   busy)       cmd_busy ;;
   mark)       shift; cmd_mark "$@" ;;
   install)    cmd_install ;;
