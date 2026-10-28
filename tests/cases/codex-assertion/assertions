@@ -1,0 +1,8 @@
+Assertion status system-wide:
+Listed by owning process:
+   pid 900101(codex): [0x000a926f0001974d] 00:00:23 PreventUserIdleSystemSleep named: "Codex is running an active turn"  
+   pid 900103(caffeinate): [0x000606c700018d30] 166:51:34 PreventUserIdleSystemSleep named: "caffeinate command-line tool"  
+	Details: caffeinate asserting on behalf of Process ID 900102
+	Created for PID: 900102. 
+   pid 352(powerd): [0x000a72bd000190f7] 02:12:52 PreventUserIdleSystemSleep named: "Powerd - Prevent sleep while display is on"  
+Kernel Assertions: 0x104=USB,MAGICWAKE

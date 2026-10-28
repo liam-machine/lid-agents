@@ -154,6 +154,7 @@ This switches lid-close sleep back on and removes the app, the command, the logi
 git clone https://github.com/liam-machine/lid-agents && cd lid-agents
 scripts/build.sh      # universal "build/Lid Agents.app", dist/LidAgents.dmg, dist/lid-agents.tar.gz
 ./install.sh          # installs the local build
+tests/run.sh          # tests for bin/agents (detection, agents mark, hooks); see tests/README.md
 ```
 
 **Releasing.** Every merge to `main` that changes the app is built by GitHub Actions, signed, notarized and published as the next patch release (latest tag + 1), with the DMG, the tarball and `install.sh`. Installed copies offer it within a day. Pushes that only change docs don't release. CI won't publish an unsigned release: the signing secrets come from `scripts/setup-signing-secrets.sh`, a one-time step for maintainers.

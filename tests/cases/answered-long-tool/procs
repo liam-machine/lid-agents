@@ -1,0 +1,6 @@
+900601 1 0.4 40:00 /Users/me/.local/bin/claude
+900602 900601 0.0 39:00 /bin/zsh
+900603 900602 0.0 00:45 npm
+900604 900601 0.0 00:20 caffeinate
+900611 1 0.2 40:00 /Users/me/.local/bin/codex
+900612 900611 0.0 00:03 /bin/sh

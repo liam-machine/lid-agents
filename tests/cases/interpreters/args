@@ -1,0 +1,4 @@
+900301 node --no-warnings /opt/homebrew/bin/gemini
+900302 claude
+900304 /opt/homebrew/bin/python3 -m aider --model sonnet
+900305 node /Users/me/app/server.js gemini
