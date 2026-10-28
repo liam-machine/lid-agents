@@ -11,6 +11,8 @@
 #   agents busy                   which agent processes count as busy (or need you) right now
 #   agents wait [minutes]         how long a closed Mac stays awake for an agent that needs you
 #                                 (default 3; also under the cup → When an agent needs you)
+#   agents remote [on|off]        Claude Code's Remote Control for new sessions, so you can answer
+#                                 them from your phone; lists busy sessions that aren't connected
 #   agents hotkey [keys|none]     show or set the hotkey, e.g. agents hotkey ctrl+opt+cmd+l
 #   agents install                one-time: passwordless sudo for exactly two pmset commands
 #   agents integrate              let Lid Agents see when Codex and OpenCode are busy, and when
@@ -353,6 +355,10 @@ cmd_keep() {
   else
     echo "  …while they're busy: $busy now ($cap, battery floor ${MIN_BATTERY}%). Close the lid whenever."
   fi
+  local missing; missing="$(remote_missing)"
+  if [ -n "$missing" ]; then
+    echo "  Not on Remote Control: $(printf '%s\n' "$missing" | remote_missing_names). To answer from your phone, run /remote-control in each before you close the lid."
+  fi
   if on_battery; then echo "  On battery ($(battery_pct)%): keep it out of a bag, it can't vent with the lid shut."; fi
 }
 
@@ -381,6 +387,14 @@ cmd_status() {
   echo "  waiting: $(printf '%s\n' "$report" | awk 'NF && $3 " " $4 == "needs input"' | wc -l | tr -d ' ') need you · a closed Mac stays awake $(wait_minutes) min for an answer (agents wait)"
   echo "  battery: $(battery_pct)% $(on_battery && echo '(on battery)' || echo '(on AC)') · lid $(lid_closed && echo closed || echo open)"
   echo "  hotkey:  $(current_hotkey)"
+  if [ -d "$(dirname "$(claude_settings_file)")" ]; then
+    local missing remote; missing="$(remote_missing "$report")"
+    remote="$(remote_on && echo on || echo off) for new Claude sessions (agents remote)"
+    if [ -n "$missing" ]; then
+      remote="$remote · busy, not connected: $(printf '%s\n' "$missing" | remote_missing_names) (run /remote-control in each)"
+    fi
+    echo "  remote:  $remote"
+  fi
   if ! pgrep -x LidAgents >/dev/null; then
     echo "  app:     not running (open Lid Agents from Applications or Spotlight)"
   fi
@@ -571,25 +585,13 @@ hook_clear_cmd() {
   printf '%s' "d=\"\$HOME/.cache/lid-agents/waiting\"; [ -d \"\$d\" ] && { rm -f \"\$d/\$PPID\"; : > \"\$d/.clear-\$PPID\"; } 2>/dev/null; true $HOOK_TAG"
 }
 
-# Claude Code and Codex share the hooks JSON shape: { hooks: { Event: [ { matcher?, hooks: [
-# { type: "command", command } ] } ] } }. Rewrites <file> without this script's entries, then
-# (add) with the ones in <spec>, lines of "Event<TAB>matcher<TAB>command". Everything else in
-# the file is kept; the first change leaves a .lid-agents.bak copy next to it.
-edit_hooks_json() {   # edit_hooks_json <file> add|remove [spec]
-  local file="$1" mode="$2" spec="${3:-}"
-  while [ -L "$file" ]; do
-    case "$(readlink "$file")" in /*) file="$(readlink "$file")" ;; *) file="$(dirname "$file")/$(readlink "$file")" ;; esac
-  done
-  if [ "$mode" = "remove" ] && { [ ! -f "$file" ] || ! grep -qF "$HOOK_TAG" "$file"; }; then return 0; fi
-  mkdir -p "$(dirname "$file")"
-  if [ -f "$file" ] && [ ! -e "$file.lid-agents.bak" ]; then cp -p "$file" "$file.lid-agents.bak"; fi
-  osascript -l JavaScript - "$file" "$mode" "$HOOK_TAG" "$spec" <<'JXA' >/dev/null || return 1
-function run(argv) {
-  const [path, mode, tag, spec] = argv;
-  const fm = $.NSFileManager.defaultManager;
+# Safe reads and writes for the JSON settings files this script edits, shared by the editors below
+read -r -d '' JSON_FILE_JXA <<'JXA'
+const fm = $.NSFileManager.defaultManager;
+function readObject(path) {
   let data = {}, before = null, perms = null;
   if (fm.fileExistsAtPath(path)) {
-    // Unreadable or not UTF-8: fail and leave the file alone (never replace it with just hooks)
+    // Unreadable or not UTF-8: fail and leave the file alone (never replace it with just our part)
     const raw = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null);
     if (raw.isNil()) throw new Error("couldn't read " + path);
     const text = ObjC.unwrap(raw);
@@ -599,6 +601,45 @@ function run(argv) {
     const attrs = fm.attributesOfItemAtPathError(path, null);
     if (!attrs.isNil()) perms = attrs.objectForKey($.NSFilePosixPermissions);
   }
+  return { data, before, perms };
+}
+function writeObject(path, file) {
+  // Nothing to change (the usual case at each app launch): don't rewrite the user's file
+  if (file.before !== null && JSON.stringify(file.data) === file.before) return "unchanged";
+  const ok = $(JSON.stringify(file.data, null, 2) + "\n").writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
+  if (!ok) throw new Error("couldn't write " + path);
+  // The atomic write makes a new file: give it the old one's permissions (e.g. 600 with API keys)
+  if (file.perms && !file.perms.isNil()) {
+    fm.setAttributesOfItemAtPathError($.NSDictionary.dictionaryWithObjectForKey(file.perms, $.NSFilePosixPermissions), path, null);
+  }
+  return "ok";
+}
+JXA
+
+# Prints the file a symlinked <file> points to, after keeping a .lid-agents.bak copy of it before
+# this script's first change
+json_file_target() {   # json_file_target <file>
+  local file="$1"
+  while [ -L "$file" ]; do
+    case "$(readlink "$file")" in /*) file="$(readlink "$file")" ;; *) file="$(dirname "$file")/$(readlink "$file")" ;; esac
+  done
+  mkdir -p "$(dirname "$file")"
+  if [ -f "$file" ] && [ ! -e "$file.lid-agents.bak" ]; then cp -p "$file" "$file.lid-agents.bak"; fi
+  printf '%s\n' "$file"
+}
+
+# Claude Code and Codex share the hooks JSON shape: { hooks: { Event: [ { matcher?, hooks: [
+# { type: "command", command } ] } ] } }. Rewrites <file> without this script's entries, then
+# (add) with the ones in <spec>, lines of "Event<TAB>matcher<TAB>command". Everything else in
+# the file is kept; the first change leaves a .lid-agents.bak copy next to it.
+edit_hooks_json() {   # edit_hooks_json <file> add|remove [spec]
+  local file="$1" mode="$2" spec="${3:-}"
+  if [ "$mode" = "remove" ] && { [ ! -f "$file" ] || ! grep -qF "$HOOK_TAG" "$file"; }; then return 0; fi
+  file="$(json_file_target "$file")"
+  { printf '%s\n' "$JSON_FILE_JXA"; cat <<'JXA'; } | osascript -l JavaScript - "$file" "$mode" "$HOOK_TAG" "$spec" >/dev/null || return 1
+function run(argv) {
+  const [path, mode, tag, spec] = argv;
+  const file = readObject(path), data = file.data;
   const hooks = (data.hooks && typeof data.hooks === "object") ? data.hooks : {};
   const ours = (h) => h && typeof h.command === "string" && h.command.includes(tag);
   for (const event of Object.keys(hooks)) {
@@ -620,18 +661,30 @@ function run(argv) {
     }
   }
   if (Object.keys(hooks).length) data.hooks = hooks; else delete data.hooks;
-  // Nothing to change (the usual case at each app launch): don't rewrite the user's file
-  if (before !== null && JSON.stringify(data) === before) return "unchanged";
-  const ok = $(JSON.stringify(data, null, 2) + "\n").writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
-  if (!ok) throw new Error("couldn't write " + path);
-  // The atomic write makes a new file: give it the old one's permissions (e.g. 600 with API keys)
-  if (perms && !perms.isNil()) {
-    fm.setAttributesOfItemAtPathError($.NSDictionary.dictionaryWithObjectForKey(perms, $.NSFilePosixPermissions), path, null);
-  }
-  return "ok";
+  return writeObject(path, file);
 }
 JXA
   if [ "$mode" = "add" ] && ! grep -qxF "$file" "$HOOK_FILES" 2>/dev/null; then echo "$file" >> "$HOOK_FILES"; fi
+}
+
+# Sets top-level keys in a Claude Code settings file, each "key=<JSON value>"; "?key=value" only
+# sets a key the file doesn't have yet, so a choice the user made stays. Same safety as the hooks.
+set_claude_settings() {   # set_claude_settings <file> [?]key=value...
+  local file; file="$(json_file_target "$1")"; shift
+  { printf '%s\n' "$JSON_FILE_JXA"; cat <<'JXA'; } | osascript -l JavaScript - "$file" "$@" >/dev/null 2>&1
+function run(argv) {
+  const [path, ...pairs] = argv;
+  const file = readObject(path);
+  for (let pair of pairs) {
+    const onlyUnset = pair.startsWith("?");
+    if (onlyUnset) pair = pair.slice(1);
+    const at = pair.indexOf("="), key = pair.slice(0, at);
+    if (onlyUnset && Object.prototype.hasOwnProperty.call(file.data, key)) continue;
+    file.data[key] = JSON.parse(pair.slice(at + 1));
+  }
+  return writeObject(path, file);
+}
+JXA
 }
 
 # Files that may hold our hooks: the ones integrate recorded (so a custom CLAUDE_CONFIG_DIR is
@@ -688,6 +741,79 @@ integrate_hooks() {
     fi
   done < <(codex_homes)
   echo "          Codex asks you to review new hooks once (/hooks in a Codex session); Superset's Codex runs them as is."
+}
+
+# --- Remote Control (Claude Code's own: claude.ai/code and the Claude app reach a session here) ---
+
+# The Claude Code settings file: $CLAUDE_CONFIG_DIR's, else one integrate recorded (the app doesn't
+# inherit a custom CLAUDE_CONFIG_DIR), else ~/.claude's
+claude_settings_file() {
+  if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
+    local f; f="$(grep -v '/hooks\.json$' "$HOOK_FILES" 2>/dev/null | head -1)"
+    if [ -n "$f" ]; then echo "$f"; return 0; fi
+  fi
+  echo "$CLAUDE_SETTINGS"
+}
+
+remote_on() { [ "$(plutil -extract remoteControlAtStartup raw -o - "$(claude_settings_file)" 2>/dev/null)" = "true" ]; }
+
+# "pid folder" per busy Claude Code session (or one that needs input) not on Remote Control. Claude
+# Code keeps a sessions/<pid>.json per running session, with a bridgeSessionId while it's connected.
+# That file is undocumented, so a session without one (an older version) is left out, not flagged.
+remote_missing() {   # remote_missing [agent report]
+  local report="${1-$(agent_report)}" dir pid name f
+  dir="$(dirname "$(claude_settings_file)")/sessions"
+  printf '%s\n' "$report" | while read -r pid name _; do
+    [ "$name" = "claude" ] && [ -f "$dir/$pid.json" ] || continue
+    f="$dir/$pid.json"
+    [ "$(plutil -extract kind raw -o - "$f" 2>/dev/null)" = "interactive" ] || continue
+    plutil -extract bridgeSessionId raw -o - "$f" >/dev/null 2>&1 && continue
+    echo "$pid $(agent_folder "$pid")"
+  done
+}
+
+# "claude in a, claude in b": the busy sessions remote_missing printed
+remote_missing_names() { awk '{ $1 = ""; sub(/^ /, ""); n = split($0, p, "/"); printf "%sclaude in %s", (NR > 1 ? ", " : ""), (p[n] == "" ? "?" : p[n]) }'; }
+
+# agents remote [on|off]: Claude Code's Remote Control for every new session, so you can answer an
+# agent from your phone with the lid closed. A session that's already running can only connect from
+# inside it (/remote-control), so this also names busy ones that aren't connected.
+cmd_remote() {
+  local file missing; file="$(claude_settings_file)"
+  case "${1:-}" in
+    on)
+      # Push when one needs you, unless you've chosen otherwise in /config
+      set_claude_settings "$file" remoteControlAtStartup=true '?inputNeededNotifEnabled=true' ||
+        { echo "agents: couldn't update $file (is it valid JSON?)" >&2; exit 1; }
+      log "remote control: on"
+      echo "Remote Control: on. New Claude Code sessions connect, and the Claude app gets a push when one needs you." ;;
+    off)
+      set_claude_settings "$file" remoteControlAtStartup=false ||
+        { echo "agents: couldn't update $file (is it valid JSON?)" >&2; exit 1; }
+      log "remote control: off"
+      echo "Remote Control: off for new Claude Code sessions. Connected ones stay on until you run /remote-control in them."
+      return 0 ;;
+    --state)
+      # For the menu bar app: on|off|none, then remote_missing's lines
+      if [ ! -d "$(dirname "$file")" ]; then echo none; return 0; fi
+      remote_on && echo on || echo off
+      remote_missing
+      return 0 ;;
+    "")
+      if remote_on; then
+        echo "Remote Control: on for new Claude Code sessions"
+        echo "  agents remote off · answer them at claude.ai/code or in the Claude app"
+      else
+        echo "Remote Control: off for new Claude Code sessions"
+        echo "  agents remote on     new sessions connect, so you can answer them from your phone"
+      fi ;;
+    *) echo "agents: use agents remote, agents remote on or agents remote off" >&2; exit 1 ;;
+  esac
+  missing="$(remote_missing)"
+  if [ -n "$missing" ]; then
+    echo "  Busy and not on Remote Control: $(printf '%s\n' "$missing" | remote_missing_names)."
+    echo "  Run /remote-control in each to reach it from your phone."
+  fi
 }
 
 # agents wait [minutes]: how long a closed Mac stays awake for an agent that needs input.
@@ -755,6 +881,18 @@ cmd_integrate() {
   # Claude Code and Codex: hooks that mark an agent stopped on a prompt as "needs input"
   integrate_hooks
 
+  # Claude Code: Remote Control for new sessions, unless you've already chosen either way
+  if command -v claude >/dev/null 2>&1 || [ -d "$(dirname "$CLAUDE_SETTINGS")" ]; then
+    if ! set_claude_settings "$(claude_settings_file)" '?remoteControlAtStartup=true' '?inputNeededNotifEnabled=true'; then
+      echo "Remote:   couldn't update $(claude_settings_file) (is it valid JSON?)" >&2
+    elif remote_on; then
+      echo "Remote:   new Claude Code sessions connect to Remote Control, so you can answer them from your phone"
+      echo "          (agents remote off to stop). Sessions already open: run /remote-control in them."
+    else
+      echo "Remote:   off for new Claude Code sessions, as you chose (agents remote on)"
+    fi
+  fi
+
   touch "$STATE_DIR/integrated"      # install.sh stops suggesting `agents integrate`
   log "integrate"
 }
@@ -774,6 +912,10 @@ cmd_uninstall() {
   done < <(hook_files)
   if [ -L "$LINK" ]; then rm -f "$LINK"; fi
   if [ -n "$APP_BUNDLE" ] && [ -d "$APP_BUNDLE" ]; then rm -rf "$APP_BUNDLE" && echo "Removed $APP_BUNDLE"; fi
+  # A Claude Code setting, which you may want either way, so it's left as it is
+  if remote_on; then
+    echo "Claude Code still connects new sessions to Remote Control. To stop: /config in Claude Code → Enable Remote Control for all sessions."
+  fi
   rm -rf "$STATE_DIR"
   echo "Lid Agents is uninstalled. Closing the lid sleeps the Mac as normal."
   if command -v codex >/dev/null 2>&1; then
@@ -801,6 +943,7 @@ case "${1:-status}" in
   integrate)  shift; cmd_integrate "$@" ;;
   hotkey)     shift; cmd_hotkey "$@" ;;
   wait)       shift; cmd_wait "$@" ;;
+  remote)     shift; cmd_remote "$@" ;;
   uninstall)  cmd_uninstall ;;
   update)     cmd_update ;;
   version|--version|-v) echo "lid-agents $AGENTS_VERSION" ;;
