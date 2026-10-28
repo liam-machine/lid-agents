@@ -67,6 +67,24 @@ enum Agents {
         }
     }
 
+    /// Claude Code's Remote Control for new sessions (nil when Claude Code isn't set up here), and
+    /// the folder of each busy Claude session that isn't connected
+    static func remote() -> (on: Bool?, missing: [String]) {
+        let lines = run(["remote", "--state"]).output.split(separator: "\n").map(String.init)
+        guard let first = lines.first, first == "on" || first == "off" else { return (nil, []) }
+        let missing = lines.dropFirst().compactMap { line -> String? in
+            let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+            guard parts.count >= 1, Int(parts[0]) != nil else { return nil }
+            return parts.count > 1 ? parts[1] : ""
+        }
+        return (first == "on", missing)
+    }
+
+    /// "claude in a, claude in b" for the sessions remote() found
+    static func names(_ folders: [String]) -> String {
+        folders.map { "claude in " + ($0.isEmpty ? "?" : ($0 as NSString).lastPathComponent) }.joined(separator: ", ")
+    }
+
     static func lastAutoPauseReason() -> String? {
         guard let text = try? String(contentsOfFile: logPath, encoding: .utf8),
               let line = text.split(separator: "\n").last(where: { $0.contains("auto-pause:") }),
@@ -745,16 +763,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Agents.run(args)
             let next = Agents.state()
+            // Switching keep on is the moment before the lid closes: say which agents your phone can't reach
+            let missing = next.keeping ? Agents.remote().missing : []
             DispatchQueue.main.async {
                 if result.status != 0 {
                     let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
                     self.notify("Lid Agents couldn't change the setting", message.isEmpty ? "Run `agents install` in a terminal." : message)
                 } else if next.keeping {
                     let always = args.contains("--always")
+                    let remote = missing.isEmpty ? ""
+                        : " Not on Remote Control: \(Agents.names(missing)). Run /remote-control in \(missing.count == 1 ? "it" : "each") to answer from your phone."
                     self.notify("Agents keep running",
-                                always ? "Lid closed won't sleep the Mac, busy or not (3h)."
+                                (always ? "Lid closed won't sleep the Mac, busy or not (3h)."
                                     : next.busy == 0 ? "None busy yet: pauses in ~\(next.idleMinutes) min unless one starts."
-                                    : "\(next.busy) busy. Close the lid whenever.")
+                                    : "\(next.busy) busy. Close the lid whenever.") + remote)
                 } else {
                     self.notify("Agents pause", "Closing the lid sleeps the Mac.")
                 }
@@ -774,6 +796,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     func menuNeedsUpdate(_ menu: NSMenu) {
         apply(Agents.state())
         let busy = Agents.busy()
+        let remote = Agents.remote()
         menu.removeAllItems()
 
         func info(_ title: String, symbol: String? = nil) {
@@ -805,6 +828,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if !state.setupOK {
             action("Finish Setup… (needs your password once)", #selector(finishSetup), symbol: "exclamationmark.triangle.fill")
         }
+        if !remote.missing.isEmpty {
+            menu.addItem(remoteWarningItem(remote.missing))
+        }
         menu.addItem(.separator())
 
         if state.keeping {
@@ -828,6 +854,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(busyItem)
 
         menu.addItem(waitMenuItem())
+        if let on = remote.on {
+            let item = NSMenuItem(title: "Remote Control for new Claude sessions", action: #selector(toggleRemote(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = on ? .on : .off
+            item.toolTip = "New Claude Code sessions connect to Remote Control, so you can answer them from claude.ai/code or the Claude app"
+            menu.addItem(item)
+        }
         menu.addItem(hotkeyMenuItem())
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self
@@ -854,6 +887,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     @objc func toggleLogin() {
         setOpenAtLogin(!FileManager.default.fileExists(atPath: launchAgentPath))
+    }
+
+    // MARK: Remote Control
+
+    /// Busy Claude sessions your phone can't reach. Claude Code only connects a running session
+    /// from inside it, so the menu says where to run /remote-control rather than doing it.
+    func remoteWarningItem(_ missing: [String]) -> NSMenuItem {
+        let count = missing.count
+        let item = NSMenuItem(title: "\(count) busy Claude session\(count == 1 ? "" : "s") not on Remote Control",
+                              action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+        let submenu = NSMenu()
+        let note = NSMenuItem(title: "Run /remote-control in \(count == 1 ? "it" : "each") to answer from your phone",
+                              action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        submenu.addItem(note)
+        for folder in missing {
+            submenu.addItem(withTitle: folder.isEmpty ? "claude" : "claude — \((folder as NSString).abbreviatingWithTildeInPath)",
+                            action: nil, keyEquivalent: "").isEnabled = false
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    @objc func toggleRemote(_ sender: NSMenuItem) {
+        let turnOn = sender.state != .on
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Agents.run(["remote", turnOn ? "on" : "off"])
+            DispatchQueue.main.async {
+                if result.status != 0 {
+                    let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.notify("Couldn't change Remote Control", message.isEmpty ? "Run `agents remote` in a terminal." : message)
+                } else if turnOn {
+                    self.notify("Remote Control on for new Claude sessions",
+                                "Answer them from claude.ai/code or the Claude app. Sessions already open: run /remote-control in them.")
+                } else {
+                    self.notify("Remote Control off for new Claude sessions",
+                                "Connected sessions stay on until you run /remote-control in them.")
+                }
+            }
+        }
     }
 }
 
