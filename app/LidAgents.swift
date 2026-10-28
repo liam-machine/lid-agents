@@ -24,6 +24,25 @@ struct AgentState {
     var lidClosed = false
     var setupOK = true
     var idleMinutes = 3
+    var always = false              // kept on whether or not an agent is busy (`agents keep --always`)
+}
+
+/// One agent the menu lists: working, or stopped on a prompt and waiting for you
+struct AgentRow {
+    var pid = 0
+    var name = ""
+    var waiting = false
+    var onPhone: Bool?              // a Claude session on Remote Control (nil: not one Lid Agents can tell)
+    var folder = ""
+}
+
+/// Everything the menu shows, from one `agents state --menu`
+struct MenuSnapshot {
+    var state = AgentState()
+    var remoteOn: Bool?             // Remote Control for new Claude sessions (nil: no Claude Code here)
+    var remoteUnset = false         // …and you've never chosen either way (it's off)
+    var agents: [AgentRow] = []
+    var offPhone: [AgentRow] { agents.filter { $0.onPhone == false } }
 }
 
 enum Agents {
@@ -46,25 +65,39 @@ enum Agents {
         return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
-    static func state() -> AgentState {
-        let f = run(["state"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: " ").map(String.init)
+    static func parseState(_ line: String) -> AgentState {
+        let f = line.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ").map(String.init)
         guard f.count >= 8 else { return AgentState() }
         return AgentState(keeping: f[0] == "keep", busy: Int(f[1]) ?? 0, guardRunning: f[2] == "1",
                           battery: Int(f[3]) ?? 0, onBattery: f[4] == "battery", lidClosed: f[5] == "closed",
-                          setupOK: f[6] == "ok", idleMinutes: Int(f[7]) ?? 3)
+                          setupOK: f[6] == "ok", idleMinutes: Int(f[7]) ?? 3, always: f.count > 8 && f[8] == "always")
     }
 
-    /// (name, folder) for each busy agent
-    static func busy() -> [(String, String)] {
-        run(["busy"]).output.split(separator: "\n").compactMap { line in
-            let parts = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-            guard parts.count >= 3, Int(parts[0]) != nil else { return nil }
-            let folder = parts.count > 4 ? parts[4...].joined(separator: " ") : ""
-            // "needs input": stopped on a prompt, so it isn't counted as busy
-            let waiting = parts.count > 3 && parts[2] == "needs" && parts[3] == "input"
-            return (waiting ? "\(parts[1]) (needs input)" : parts[1], folder)
+    static func state() -> AgentState { parseState(run(["state"]).output) }
+
+    /// The state, Remote Control and the agents, busy ones first, from one look at the processes
+    static func snapshot() -> MenuSnapshot {
+        let lines = run(["state", "--menu"]).output.split(separator: "\n").map(String.init)
+        var snap = MenuSnapshot(state: parseState(lines.first ?? ""))
+        for line in lines.dropFirst() {
+            let f = line.split(separator: " ", maxSplits: 5, omittingEmptySubsequences: false).map(String.init)
+            if f.count == 2, f[0] == "remote" {
+                snap.remoteOn = f[1] == "on" ? true : f[1] == "off" || f[1] == "unset" ? false : nil
+                snap.remoteUnset = f[1] == "unset"
+            } else if f.count >= 5, f[0] == "agent", let pid = Int(f[1]) {
+                snap.agents.append(AgentRow(pid: pid, name: f[2], waiting: f[3] == "waiting",
+                                            onPhone: f[4] == "yes" ? true : f[4] == "no" ? false : nil,
+                                            folder: f.count > 5 ? f[5] : ""))
+            }
         }
+        snap.agents.sort { !$0.waiting && $1.waiting }
+        return snap
+    }
+
+    /// "claude in a, claude in b"
+    static func names(_ agents: [AgentRow]) -> String {
+        agents.map { "\($0.name) in " + ($0.folder.isEmpty ? "?" : ($0.folder as NSString).lastPathComponent) }
+            .joined(separator: ", ")
     }
 
     static func lastAutoPauseReason() -> String? {
@@ -432,7 +465,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         DispatchQueue.global(qos: .utility).async { Agents.run(["integrate", "--refresh"]) }
         let defaults = UserDefaults.standard
         // Already set up (curl install, or an earlier run): never re-ask, never touch Open at Login
-        guard !Agents.state().setupOK else { defaults.set(true, forKey: "SetupDone"); return }
+        guard !Agents.state().setupOK else {
+            defaults.set(true, forKey: "SetupDone")
+            offerRemoteControlIfNeeded()
+            return
+        }
         guard force || !defaults.bool(forKey: "SetupDone") else { return }
 
         NSApp.activate(ignoringOtherApps: true)
@@ -458,6 +495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 if next.setupOK {
                     let how = self.hotkey.map { "Press \($0.symbols) or click" } ?? "Click"
                     self.notify("Lid Agents is set up", "\(how) the cup in the menu bar to keep agents running with the lid closed.")
+                    self.offerRemoteControlIfNeeded()
                 } else {
                     let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
                     self.notify("Setup didn't finish", message.isEmpty ? "Try Finish Setup… in the cup's menu." : message)
@@ -582,10 +620,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     func waitMenuItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "When an agent needs you: stay awake \(waitMinutes) min", action: nil, keyEquivalent: "")
-        item.image = NSImage(systemSymbolName: "hand.raised", accessibilityDescription: nil)
+        let item = NSMenuItem(title: "Wait for your answer: \(waitMinutes) min", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
-        let note = NSMenuItem(title: "With the lid closed, how long to wait for your answer", action: nil, keyEquivalent: "")
+        let note = NSMenuItem(title: "With the lid closed, an agent that needs you keeps the Mac awake this long", action: nil, keyEquivalent: "")
         note.isEnabled = false
         submenu.addItem(note)
         var choices = Self.waitChoices
@@ -629,7 +666,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     func hotkeyMenuItem() -> NSMenuItem {
         let label = hotkey?.symbols ?? unavailableHotkey.map { "\($0.symbols) (unavailable)" } ?? "None"
         let item = NSMenuItem(title: "Hotkey: \(label)", action: nil, keyEquivalent: "")
-        item.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
         let submenu = NSMenu()
         var specs = Hotkey.presets
         if let current = hotkey?.spec, !specs.contains(current) { specs.insert(current, at: 0) }
@@ -744,17 +780,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         acting = true
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Agents.run(args)
-            let next = Agents.state()
+            let snap = Agents.snapshot()
+            let next = snap.state
+            // Switching keep on is the moment before the lid closes: say which agents your phone can't reach
+            let missing = next.keeping ? snap.offPhone : []
             DispatchQueue.main.async {
                 if result.status != 0 {
                     let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
                     self.notify("Lid Agents couldn't change the setting", message.isEmpty ? "Run `agents install` in a terminal." : message)
                 } else if next.keeping {
                     let always = args.contains("--always")
+                    let remote = missing.isEmpty ? ""
+                        : " Not on Remote Control: \(Agents.names(missing)). Run /remote-control in \(missing.count == 1 ? "it" : "each") to answer from your phone."
                     self.notify("Agents keep running",
-                                always ? "Lid closed won't sleep the Mac, busy or not (3h)."
+                                (always ? "Lid closed won't sleep the Mac, busy or not (3h)."
                                     : next.busy == 0 ? "None busy yet: pauses in ~\(next.idleMinutes) min unless one starts."
-                                    : "\(next.busy) busy. Close the lid whenever.")
+                                    : "\(next.busy) busy. Close the lid whenever.") + remote)
                 } else {
                     self.notify("Agents pause", "Closing the lid sleeps the Mac.")
                 }
@@ -765,83 +806,200 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     @objc func toggle() { perform(state.keeping ? ["pause"] : ["keep"]) }
-    @objc func keep() { perform(["keep"]) }
-    @objc func keepAlways() { perform(["keep", "--always", "3"]) }
-    @objc func pause() { perform(["pause"]) }
+    // The three "When the lid closes" choices; picking the one already chosen changes nothing
+    @objc func chooseSleep() { if state.keeping { perform(["pause"]) } }
+    @objc func chooseKeep() { if !state.keeping || state.always { perform(["keep"]) } }
+    @objc func chooseKeepAlways() { if !state.keeping || !state.always { perform(["keep", "--always", "3"]) } }
 
     // MARK: Menu
+    //
+    // Top to bottom: what's happening, what to do when the lid closes, which agents are running,
+    // then everything you set once under Settings.
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        apply(Agents.state())
-        let busy = Agents.busy()
+        let snap = Agents.snapshot()
+        apply(snap.state)
         menu.removeAllItems()
 
-        func info(_ title: String, symbol: String? = nil) {
+        func info(_ title: String) {
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.isEnabled = false
-            if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
             menu.addItem(item)
         }
-        func action(_ title: String, _ selector: Selector, symbol: String, hotkey: Hotkey? = nil) {
+        func section(_ title: String) {
+            if #available(macOS 14.0, *) {
+                menu.addItem(.sectionHeader(title: title))
+            } else {
+                info(title.uppercased())
+            }
+        }
+        let font = NSFont.menuFont(ofSize: 0)
+        func text(_ string: String, bold: Bool = false, color: NSColor = .labelColor, small: Bool = false) -> NSAttributedString {
+            var f = small ? NSFont.menuFont(ofSize: NSFont.smallSystemFontSize) : font
+            if bold { f = NSFontManager.shared.convert(f, toHaveTrait: .boldFontMask) }
+            return NSAttributedString(string: string, attributes: [.font: f, .foregroundColor: color])
+        }
+        func choice(_ title: String, _ selector: Selector, chosen: Bool, hotkey: Hotkey? = nil, tip: String) {
             let item = NSMenuItem(title: title, action: selector, keyEquivalent: hotkey?.menuKey ?? "")
             item.keyEquivalentModifierMask = hotkey?.menuModifiers ?? []
             item.target = self
-            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            item.state = chosen ? .on : .off
+            item.toolTip = tip
             menu.addItem(item)
         }
 
         if let version = availableUpdate {
-            action(updating ? "Updating to \(version)…" : "Update to \(version)", #selector(installUpdate),
-                   symbol: "arrow.down.circle.fill")
+            let item = NSMenuItem(title: updating ? "Updating to \(version)…" : "Update to \(version)",
+                                  action: #selector(installUpdate), keyEquivalent: "")
+            item.target = self
+            item.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+            menu.addItem(item)
             menu.addItem(.separator())
         }
 
-        if state.keeping {
-            info("Lid closed → agents keep running", symbol: "cup.and.saucer.fill")
-        } else {
-            info("Lid closed → Mac sleeps, agents pause", symbol: "moon.zzz")
-        }
-        info("\(state.busy) agent\(state.busy == 1 ? "" : "s") busy · battery \(state.battery)%\(state.onBattery ? "" : " (charging)")")
+        // What's happening
+        menu.addItem(displayItem(text(state.keeping ? "Agents keep running with the lid closed" : "Closing the lid sleeps the Mac",
+                                      bold: true)))
+        let waiting = snap.agents.filter(\.waiting).count
+        var summary = [state.busy == 0 ? "None working" : "\(state.busy) working"]
+        if waiting > 0 { summary.append("\(waiting) need\(waiting == 1 ? "s" : "") you") }
+        summary.append("battery \(state.battery)%\(state.onBattery ? "" : " (charging)")")
+        menu.addItem(displayItem(text(summary.joined(separator: " · "))))
         if !state.setupOK {
-            action("Finish Setup… (needs your password once)", #selector(finishSetup), symbol: "exclamationmark.triangle.fill")
+            let item = NSMenuItem(title: "Finish Setup… (needs your password once)", action: #selector(finishSetup), keyEquivalent: "")
+            item.target = self
+            item.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)
+            menu.addItem(item)
         }
         menu.addItem(.separator())
 
-        if state.keeping {
-            action("Pause agents when the lid closes", #selector(pause), symbol: "moon.zzz", hotkey: hotkey)
-        } else {
-            action("Keep agents running with the lid closed", #selector(keep), symbol: "cup.and.saucer.fill", hotkey: hotkey)
-            action("Keep running even when idle (3h)", #selector(keepAlways), symbol: "clock")
+        // What to do
+        section("When the lid closes")
+        choice("Sleep (normal)", #selector(chooseSleep), chosen: !state.keeping,
+               tip: "Closing the lid sleeps the Mac and pauses your agents")
+        choice("Keep running while agents work", #selector(chooseKeep), chosen: state.keeping && !state.always, hotkey: hotkey,
+               tip: "The Mac stays on with the lid closed until your agents finish (8-hour cap), then sleeps")
+        choice("Keep running for 3 hours", #selector(chooseKeepAlways), chosen: state.keeping && state.always,
+               tip: "The Mac stays on with the lid closed for 3 hours, even when no agent is working")
+        menu.addItem(.separator())
+
+        // Which agents are running
+        section("Agents")
+        if snap.agents.isEmpty { menu.addItem(displayItem(text("None running right now", color: .secondaryLabelColor))) }
+        for agent in snap.agents { menu.addItem(agentItem(agent)) }
+        let offPhone = snap.offPhone.count
+        if offPhone > 0 {
+            menu.addItem(displayItem(text("Not on your phone: run /remote-control in \(offPhone == 1 ? "that session" : "each of those sessions")",
+                                          color: .secondaryLabelColor, small: true)))
         }
         menu.addItem(.separator())
 
-        let busyItem = NSMenuItem(title: "Busy agents", action: nil, keyEquivalent: "")
-        let busyMenu = NSMenu()
-        if busy.isEmpty {
-            busyMenu.addItem(withTitle: "None right now", action: nil, keyEquivalent: "").isEnabled = false
-        }
-        for (name, folder) in busy {
-            let title = folder.isEmpty ? name : "\(name) — \((folder as NSString).abbreviatingWithTildeInPath)"
-            busyMenu.addItem(withTitle: title, action: nil, keyEquivalent: "").isEnabled = false
-        }
-        busyItem.submenu = busyMenu
-        menu.addItem(busyItem)
+        menu.addItem(settingsItem(remoteOn: snap.remoteOn))
+        menu.addItem(.separator())
+        info("Lid Agents \(Updater.current)")
+        menu.addItem(withTitle: "Quit Lid Agents", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    }
 
-        menu.addItem(waitMenuItem())
-        menu.addItem(hotkeyMenuItem())
+    /// "claude  lid-agents      working": click to go to the agent's terminal or editor (`agents focus`).
+    /// A phone in front of a Claude session on Remote Control, an orange warning if it isn't.
+    func agentItem(_ agent: AgentRow) -> NSMenuItem {
+        let item = NSMenuItem(title: agent.name, action: #selector(focusAgent(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = agent.pid
+        let folder = agent.folder.isEmpty ? "" : (agent.folder as NSString).lastPathComponent
+        let style = NSMutableParagraphStyle()
+        style.tabStops = [NSTextTab(textAlignment: .right, location: 280)]
+        let font = NSFont.menuFont(ofSize: 0)
+        let title = NSMutableAttributedString(string: folder.isEmpty ? agent.name : "\(agent.name)  \(folder)",
+                                              attributes: [.font: font, .paragraphStyle: style])
+        title.append(NSAttributedString(string: "\t" + (agent.waiting ? "needs you" : "working"), attributes: [
+            .font: font, .paragraphStyle: style,
+            .foregroundColor: agent.waiting ? NSColor.systemOrange : NSColor.secondaryLabelColor,
+        ]))
+        item.attributedTitle = title
+        switch agent.onPhone {
+        case true?:
+            item.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: "On Remote Control")
+        case false?:
+            item.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Not on Remote Control")?
+                .withSymbolConfiguration(.init(paletteColors: [.systemOrange]))
+        case nil:
+            item.image = NSImage(size: NSSize(width: 16, height: 16))   // blank, so the names line up
+        }
+        item.toolTip = (agent.folder.isEmpty ? "" : (agent.folder as NSString).abbreviatingWithTildeInPath + "\n")
+            + "Click to go to it"
+        return item
+    }
+
+    @objc func focusAgent(_ sender: NSMenuItem) {
+        guard let pid = sender.representedObject as? Int else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            // The first time for Terminal or iTerm2, macOS asks to let Lid Agents select the tab
+            let result = Agents.run(["focus", String(pid)])
+            guard result.status != 0 else { return }
+            let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                self.notify("Couldn't go to that agent", message.isEmpty ? "It may have just finished." : message)
+            }
+        }
+    }
+
+    /// A row that only shows something. A plain item that can't be clicked is greyed out, so this
+    /// one is a view: full colour, no highlight under the pointer, lined up with the items' titles.
+    /// symbol: an SF Symbol and its colour in front; detail: text at the right edge.
+    func displayItem(_ title: NSAttributedString, symbol: (String, NSColor)? = nil, detail: NSAttributedString? = nil) -> NSMenuItem {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.edgeInsets = NSEdgeInsets(top: 3, left: 22, bottom: 3, right: 14)   // the items' title column
+        if let (name, color) = symbol, let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
+            let view = NSImageView(image: image)
+            view.contentTintColor = color
+            view.symbolConfiguration = .init(pointSize: NSFont.systemFontSize - 1, weight: .regular)
+            row.addArrangedSubview(view)
+        }
+        row.addArrangedSubview(NSTextField(labelWithAttributedString: title))
+        if let detail {
+            let gap = NSView()
+            gap.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            row.addArrangedSubview(gap)
+            row.addArrangedSubview(NSTextField(labelWithAttributedString: detail))
+        }
+        let size = row.fittingSize
+        row.frame = NSRect(x: 0, y: 0, width: max(size.width, 300), height: size.height)
+        row.autoresizingMask = [.width]          // grows with the menu, so the detail stays at the right
+        let item = NSMenuItem()
+        item.view = row
+        return item
+    }
+
+    /// Everything you set once
+    func settingsItem(remoteOn: Bool?) -> NSMenuItem {
+        let item = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.addItem(waitMenuItem())
+        if let on = remoteOn {
+            let remote = NSMenuItem(title: "Connect new Claude sessions to your phone", action: #selector(toggleRemote(_:)), keyEquivalent: "")
+            remote.target = self
+            remote.state = on ? .on : .off
+            remote.toolTip = "Claude Code's Remote Control: answer new sessions from claude.ai/code or the Claude app, which gets a push when one needs you"
+            submenu.addItem(remote)
+        }
+        submenu.addItem(hotkeyMenuItem())
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self
         login.state = FileManager.default.fileExists(atPath: launchAgentPath) ? .on : .off
-        menu.addItem(login)
-        let logItem = NSMenuItem(title: "Open Log", action: #selector(openLog), keyEquivalent: "")
-        logItem.target = self
-        menu.addItem(logItem)
-        let checkItem = NSMenuItem(title: "Check for Updates…", action: #selector(manualUpdateCheck), keyEquivalent: "")
-        checkItem.target = self
-        menu.addItem(checkItem)
-        info("Version \(Updater.current)")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit Lid Agents", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        submenu.addItem(login)
+        submenu.addItem(.separator())
+        let check = NSMenuItem(title: "Check for Updates…", action: #selector(manualUpdateCheck), keyEquivalent: "")
+        check.target = self
+        submenu.addItem(check)
+        let log = NSMenuItem(title: "Open Log", action: #selector(openLog), keyEquivalent: "")
+        log.target = self
+        submenu.addItem(log)
+        item.submenu = submenu
+        return item
     }
 
     @objc func openLog() {
@@ -854,6 +1012,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     @objc func toggleLogin() {
         setOpenAtLogin(!FileManager.default.fileExists(atPath: launchAgentPath))
+    }
+
+    // MARK: Remote Control
+    //
+    // Claude Code only connects a running session from inside it, so for one that isn't connected
+    // the menu says where to run /remote-control rather than doing it.
+
+    @objc func toggleRemote(_ sender: NSMenuItem) { setRemote(sender.state != .on) }
+
+    /// Once, after setup: explain Remote Control and offer to turn it on, if Claude Code is here and
+    /// you've never chosen either way (in /config, `agents remote`, or this prompt)
+    func offerRemoteControlIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "RemoteControlOffered") else { return }
+        DispatchQueue.global(qos: .utility).async {
+            let snap = Agents.snapshot()
+            DispatchQueue.main.async {
+                guard snap.remoteOn != nil else { return }      // no Claude Code yet: ask once it's here
+                defaults.set(true, forKey: "RemoteControlOffered")
+                guard snap.remoteUnset else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Answer your agents from your phone?"
+                alert.informativeText = """
+                    Claude Code's Remote Control connects each new Claude Code session to the Claude app \
+                    and claude.ai/code. With the lid closed you can answer a permission prompt or a question \
+                    from anywhere, and the app sends you a push when an agent needs you.
+
+                    Your code keeps running on this Mac, and sessions show only in your own Claude account. \
+                    It needs a Claude Pro, Max, Team or Enterprise plan.
+
+                    Change it any time: the cup → Settings → Connect new Claude sessions to your phone, \
+                    or `agents remote on` / `off` in a terminal.
+                    """
+                alert.addButton(withTitle: "Turn On")
+                alert.addButton(withTitle: "Not Now")
+                if alert.runModal() == .alertFirstButtonReturn { self.setRemote(true) }
+            }
+        }
+    }
+
+    func setRemote(_ turnOn: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Agents.run(["remote", turnOn ? "on" : "off"])
+            DispatchQueue.main.async {
+                if result.status != 0 {
+                    let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.notify("Couldn't change Remote Control", message.isEmpty ? "Run `agents remote` in a terminal." : message)
+                } else if turnOn {
+                    self.notify("Remote Control on for new Claude sessions",
+                                "Answer them from claude.ai/code or the Claude app. Sessions already open: run /remote-control in them.")
+                } else {
+                    self.notify("Remote Control off for new Claude sessions",
+                                "Connected sessions stay on until you run /remote-control in them.")
+                }
+            }
+        }
     }
 }
 

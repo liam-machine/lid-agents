@@ -53,7 +53,7 @@ notarize() {   # notarize <file>: submit, wait, and staple
 
 if [ -n "$SIGN_IDENTITY" ]; then
   echo "==> Signing with $SIGN_IDENTITY (hardened runtime)"
-  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+  codesign --force --options runtime --timestamp --entitlements app/LidAgents.entitlements --sign "$SIGN_IDENTITY" "$APP"
 else
   echo "==> Signing ad hoc (set SIGN_IDENTITY for a Developer ID build)"
   codesign --force --sign - "$APP"

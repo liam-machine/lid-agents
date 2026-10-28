@@ -140,7 +140,13 @@ check "integrate: a custom CLAUDE_CONFIG_DIR is recorded" "yes" \
   source "$AGENTS"
   edit_hooks_json "$home/.claude/settings.json" remove && edit_hooks_json "$home/.codex/hooks.json" remove
 )
-check "remove: Claude settings back to the original" "same" "$(cmp -s "$TMP/claude.orig" "$home/.claude/settings.json" && echo same)"
+# Remote Control is a Claude Code setting you may want either way, so uninstall leaves it
+without_remote() {
+  osascript -l JavaScript -e 'function run(a) { const o = JSON.parse(a[0]); delete o.remoteControlAtStartup
+    delete o.inputNeededNotifEnabled; return JSON.stringify(o, null, 2) }' "$(cat "$1")"
+}
+check "remove: Claude settings back to the original, apart from Remote Control" "$(cat "$TMP/claude.orig")" \
+  "$(without_remote "$home/.claude/settings.json")"
 check "remove: Codex hooks back to the original" "same" "$(cmp -s "$TMP/codex.orig" "$home/.codex/hooks.json" && echo same)"
 
 # files that aren't a JSON object are left alone
@@ -150,6 +156,47 @@ check "integrate: invalid JSON is left untouched" "{ not json" "$(cat "$home/.cl
 printf '[]\n' > "$home/.claude/settings.json"
 run_agents "$home" "" integrate >/dev/null 2>&1
 check "integrate: a JSON array is left untouched" "[]" "$(cat "$home/.claude/settings.json")"
+
+# --- Remote Control: Claude Code's own settings, and which busy sessions are connected ------
+home="$TMP/remote"; mkdir -p "$home/.claude"
+S="$home/.claude/settings.json"
+setting() { plutil -extract "$1" raw -o - "$S" 2>/dev/null || echo unset; }
+remote_line() { run_agents "$home" "$1" state --menu | awk '$1 == "remote"'; }
+agent_line() { run_agents "$home" "$1" state --menu | awk '$1 == "agent" { print $2, $3, $4, $5 }'; }
+fx="$ROOT/tests/cases/claude-caffeinate"
+canonical '{"model":"opus"}' > "$S"
+check "remote: unset until chosen" "remote unset" "$(remote_line "")"
+run_agents "$home" "" integrate >/dev/null 2>&1
+check "integrate: Remote Control and its push on when never chosen" "true true" \
+  "$(setting remoteControlAtStartup) $(setting inputNeededNotifEnabled)"
+run_agents "$home" "" remote off >/dev/null
+run_agents "$home" "" integrate >/dev/null 2>&1
+check "integrate: keeps Remote Control off once you've chosen it" "false" "$(setting remoteControlAtStartup)"
+check "remote: off" "remote off" "$(remote_line "")"
+canonical '{"inputNeededNotifEnabled":false}' > "$S"
+run_agents "$home" "" remote on >/dev/null
+check "remote on: keeps a push choice you made" "true false" \
+  "$(setting remoteControlAtStartup) $(setting inputNeededNotifEnabled)"
+check "remote: on" "remote on" "$(remote_line "")"
+# a busy Claude session's sessions/<pid>.json says whether it's connected
+mkdir -p "$home/.claude/sessions"
+canonical '{"pid":900001,"kind":"interactive"}' > "$home/.claude/sessions/900001.json"
+check "state --menu: a busy Claude session not on Remote Control" "900001 claude working no" "$(agent_line "$fx")"
+canonical '{"pid":900001,"kind":"interactive","bridgeSessionId":"session_x"}' > "$home/.claude/sessions/900001.json"
+check "state --menu: a busy Claude session on Remote Control" "900001 claude working yes" "$(agent_line "$fx")"
+rm "$home/.claude/sessions/900001.json"
+check "state --menu: a session without a file isn't flagged" "900001 claude working -" "$(agent_line "$fx")"
+
+# --- agents focus: the steps for each kind of app (tests/focus/<case>/) ---------------------
+for dir in "$ROOT"/tests/focus/*/; do
+  dir="${dir%/}"
+  check "focus: ${dir##*/}" "$(cat "$dir/expected")" \
+    "$(run_agents "$TMP" "$dir" focus --plan "$(cat "$dir/pid")" | tr '\t' ' ')"
+done
+run_agents "$TMP" "$ROOT/tests/focus/nothing-known" focus 900933 >/dev/null 2>&1; status=$?
+check "focus: says so when it can't tell the app" "1" "$status"
+run_agents "$TMP" "$ROOT/tests/focus/cmux" focus 999999 >/dev/null 2>&1; status=$?
+check "focus: a pid that isn't running" "1" "$status"
 
 echo
 echo "$pass passed, $fail failed"

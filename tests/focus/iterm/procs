@@ -1,0 +1,4 @@
+900718 1 1.0 2-00:00:00 /Applications/iTerm.app/Contents/MacOS/iTerm2
+900719 900718 0.0 01:00:00 /usr/bin/login
+900720 900719 0.0 01:00:00 -zsh
+900721 900720 3.0 10:00 /Users/me/.local/bin/claude

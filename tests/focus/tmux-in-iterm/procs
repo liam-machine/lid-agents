@@ -1,0 +1,9 @@
+900801 1 0.5 2-00:00:00 /opt/homebrew/bin/tmux
+900802 900801 0.0 01:00:00 -zsh
+900803 900802 3.0 10:00 /Users/me/.local/bin/claude
+900810 1 1.0 2-00:00:00 /Applications/iTerm.app/Contents/MacOS/iTerm2
+900811 900810 0.0 01:00:00 -zsh
+900812 900811 0.0 01:00:00 /opt/homebrew/bin/tmux
+900820 1 1.0 2-00:00:00 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+900821 900820 0.0 01:00:00 -zsh
+900822 900821 0.0 01:00:00 /opt/homebrew/bin/tmux
