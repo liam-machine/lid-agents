@@ -2,8 +2,9 @@
 
 ## 1.3.0
 
-- **Answer agents from your phone.** Lid Agents turns on Claude Code's own [Remote Control](https://code.claude.com/docs/en/remote-control) for new sessions, so with the lid closed you can answer a Claude session from claude.ai/code or the Claude app, which gets a push when it needs you. Turn it on or off under the cup → **Remote Control for new Claude sessions**, or with `agents remote on|off`. `agents integrate` turns it on unless you've already chosen. It sets `remoteControlAtStartup` and, unless you've chosen otherwise, `inputNeededNotifEnabled` in `~/.claude/settings.json`.
+- **Answer agents from your phone.** Lid Agents turns on Claude Code's own [Remote Control](https://code.claude.com/docs/en/remote-control) for new sessions, so with the lid closed you can answer a Claude session from claude.ai/code or the Claude app, which gets a push when it needs you. Turn it on or off under the cup → **Settings** → **Connect new Claude sessions to your phone**, or with `agents remote on|off`. `agents integrate` turns it on unless you've already chosen. It sets `remoteControlAtStartup` and, unless you've chosen otherwise, `inputNeededNotifEnabled` in `~/.claude/settings.json`.
 - **Busy sessions your phone can't reach are named.** Claude Code only connects a session that's already running from inside it, so when you switch keep on, the notification lists any busy Claude session that isn't on Remote Control, and so do the cup's menu, `agents` and `agents remote`. Run `/remote-control` in each before you close the lid.
+- **A clearer menu.** Top to bottom: what's happening, **When the lid closes** (**Sleep (normal)**, **Keep running while agents work**, **Keep running for 3 hours**, with a tick on the one in use), the **Agents** that are running (each **working** or **needs you**, with a phone in front of a Claude session on Remote Control and ⚠ in front of one that isn't), then **Settings** for the wait time, Remote Control, the hotkey, Open at Login, updates and the log. It opens faster too: one look at the processes instead of three.
 
 ## 1.2.0
 
