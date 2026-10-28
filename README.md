@@ -31,7 +31,7 @@ curl -fsSL https://github.com/liam-machine/lid-agents/releases/latest/download/i
 | Your agents finish | About 3 minutes later the cup empties, you get a notification, and a closed Mac goes to sleep. |
 | Click the cup → **Sleep (normal)** (or press <kbd>⌃0</kbd> again) | Back to normal: closing the lid sleeps the Mac. |
 
-The cup's menu also lists the agents that are running, each one **working** or **needs you**, and everything you set once is under **Settings**.
+The cup's menu also lists the agents that are running, each one **working** or **needs you**; click one to go to it (see below). Everything you set once is under **Settings**.
 
 The same controls from a terminal:
 
@@ -42,6 +42,7 @@ agents keep --always   # even when no agent is busy (3h)
 agents pause           # normal lid-close sleep
 agents                 # status
 agents busy            # which agents count as busy (or need you), and in which folder
+agents focus 12345     # bring that agent's terminal or editor to the front, at its tab
 agents wait 10         # a closed Mac stays awake 10 min for an agent that needs you (default 3)
 agents integrate       # let Lid Agents see when Codex and OpenCode are busy, and when an agent needs you
 agents remote on       # new Claude Code sessions connect to Remote Control, so you can answer from your phone
@@ -52,6 +53,18 @@ agents update          # install the latest release
 ## Any terminal: Ghostty, cmux, Superset, IDEs
 
 Lid Agents looks at processes, not at the app they run in, so agents count the same in Ghostty, cmux, Superset, Terminal, iTerm, tmux or an IDE's terminal. Wrappers that those apps put in front of `claude`, `codex` or `opencode` keep the agent's process name. Agents installed through npm, bun or pip run as `node` or `python`; for those the script name counts, so `node …/bin/gemini` is Gemini CLI.
+
+**Click an agent to go to it.** In the cup's **Agents** list, or with `agents focus <pid>`. The app is whichever one the agent runs in, found from its processes, so any terminal or editor works, listed here or not. Where the app has a way in, you land on the agent's own tab:
+
+| Where the agent runs | Where you land |
+|---|---|
+| cmux | its tab (cmux's command line) |
+| Terminal, iTerm2 | its tab. The first time, macOS asks to let Lid Agents control that app (Privacy & Security → Automation) |
+| tmux | its pane, then the terminal tab of whoever used that session last |
+| WezTerm; kitty with `listen_on` set | its pane or window |
+| VS Code, Cursor, Ghostty, Warp, Superset, Zed, JetBrains, anything else | the app, brought to the front |
+
+Selecting a window or tab in any app would need the Accessibility permission, which Lid Agents doesn't ask for.
 
 ## Codex and OpenCode
 

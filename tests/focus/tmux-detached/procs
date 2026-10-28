@@ -1,0 +1,3 @@
+900901 1 0.5 2-00:00:00 /opt/homebrew/bin/tmux
+900902 900901 0.0 01:00:00 -zsh
+900903 900902 3.0 10:00 /Users/me/.local/bin/claude

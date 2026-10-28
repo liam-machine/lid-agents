@@ -1,0 +1,4 @@
+900730 1 2.0 2-00:00:00 /Applications/Visual Studio Code.app/Contents/MacOS/Electron
+900731 900730 1.0 2-00:00:00 /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper
+900733 900731 0.0 01:00:00 /bin/zsh
+900734 900733 3.0 10:00 /Users/me/.local/bin/claude

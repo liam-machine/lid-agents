@@ -9,6 +9,8 @@
 #   agents toggle                 switch between keep and pause
 #   agents                        status
 #   agents busy                   which agent processes count as busy (or need you) right now
+#   agents focus <pid>            bring an agent's terminal or editor to the front, at its own tab
+#                                 where the app allows (cmux, tmux, Terminal, iTerm2, WezTerm, kitty)
 #   agents wait [minutes]         how long a closed Mac stays awake for an agent that needs you
 #                                 (default 3; also the cup → Settings → Wait for your answer)
 #   agents remote [on|off]        Claude Code's Remote Control for new sessions, so you can answer
@@ -134,6 +136,32 @@ read_assertions() {
 pid_alive() {
   if [ -n "${AGENTS_TEST_FIXTURE:-}" ]; then awk -v p="$1" '$1 == p { f = 1 } END { exit !f }' "$AGENTS_TEST_FIXTURE/procs"
   else kill -0 "$1" 2>/dev/null; fi
+}
+
+# What `agents focus` reads: a process's environment (one VAR=value per line, a value cut at its
+# first space, which none of the variables it uses have), its terminal, and a tmux pane's clients
+read_env() {   # read_env <pid>
+  if [ -n "${AGENTS_TEST_FIXTURE:-}" ]; then awk -v p="$1" '$1 == p { print $2 }' "$AGENTS_TEST_FIXTURE/env" 2>/dev/null
+  else ps -E -ww -o command= -p "$1" 2>/dev/null | tr ' ' '\n' | grep -E '^[A-Za-z_][A-Za-z0-9_]*='; fi
+}
+read_tty() {   # read_tty <pid>: ttys012, or nothing
+  if [ -n "${AGENTS_TEST_FIXTURE:-}" ]; then awk -v p="$1" '$1 == p { print $2 }' "$AGENTS_TEST_FIXTURE/ttys" 2>/dev/null
+  else ps -o tty= -p "$1" 2>/dev/null | tr -d ' ' | grep -v '^??$'; fi
+}
+read_tmux_clients() {   # read_tmux_clients <socket> <pane>: "<last activity> <pid>" per client of the pane's session
+  if [ -n "${AGENTS_TEST_FIXTURE:-}" ]; then cat "$AGENTS_TEST_FIXTURE/tmux-clients" 2>/dev/null; return 0; fi
+  local tmux session; tmux="$(tool_path tmux)" || return 0
+  session="$("$tmux" -S "$1" display-message -p -t "$2" '#{session_name}' 2>/dev/null)" || return 0
+  "$tmux" -S "$1" list-clients -t "$session" -F '#{client_activity} #{client_pid}' 2>/dev/null
+}
+
+# A command-line tool by name, also where Homebrew puts it (the menu bar app's PATH has neither)
+tool_path() {
+  local d
+  for d in $(command -v "$1" 2>/dev/null) /opt/homebrew/bin/"$1" /usr/local/bin/"$1"; do
+    [ -x "$d" ] && { echo "$d"; return 0; }
+  done
+  return 1
 }
 
 # PIDs holding a power assertion that stops idle sleep, one per line. Codex holds one in its
@@ -467,6 +495,165 @@ cmd_busy() {
   echo "$out" | while read -r pid name why1 why2; do
     printf '%-7s %-10s %-16s %s\n' "$pid" "$name" "$why1 $why2" "$(agent_folder "$pid")"
   done
+}
+
+# --- agents focus: bring an agent's terminal or editor to the front --------------------------
+#
+# Which app: the first .app bundle above the agent in the process tree, so any terminal or editor
+# works without being listed here. Which tab: only where the app has a way in, using the ids it
+# puts in the agent's environment. The tree picks the app and the environment only the tab,
+# because environments are inherited (VS Code started from a cmux shell passes cmux's ids on).
+
+# The outermost .app bundle at or above <pid>: "/Applications/Visual Studio Code.app" for a Code Helper
+host_app() {   # host_app <pid> [proc table]
+  printf '%s\n' "${2:-$(proc_table)}" | awk -v start="$1" '
+    { pp[$1] = $2; c = $5; for (i = 6; i <= NF; i++) c = c " " $i; cmd[$1] = c }
+    END {
+      p = start
+      for (d = 0; d < 32 && (p in cmd); d++) {
+        if ((i = index(cmd[p], ".app/"))) { print substr(cmd[p], 1, i + 3); exit }
+        if (pp[p] == p) break
+        p = pp[p]
+      }
+    }'
+}
+
+env_value() { printf '%s\n' "$1" | awk -v k="$2" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } END { print v }'; }
+
+# The steps `agents focus` takes for <pid>, one per line, tab-separated ("-" for a value it doesn't
+# have). A tab step that fails leaves the app step, which is always there when the app is known.
+#   tmux <socket> <pane>                select the agent's tmux pane, then the client's own steps
+#   cmux <cli> <workspace> <panel>      cmux's command line
+#   terminal <tty> | iterm <tty>        AppleScript, which finds the tab by its terminal device
+#   wezterm <cli> <pane>                wezterm cli
+#   kitty <cli> <window> <socket>       kitty's remote control (when kitty listens on a socket)
+#   app <bundle path> | bundle <id>     bring the app to the front
+focus_plan() {   # focus_plan <pid> [depth]
+  local pid="$1" depth="${2:-0}" env app tty v pane client
+  [ "$depth" -le 2 ] || return 0
+  env="$(read_env "$pid")"
+  app="$(host_app "$pid")"
+  if [ -z "$app" ]; then
+    # Under tmux the tree ends at the tmux server: select the pane, then go on from the client
+    # that used its session last (its terminal tab)
+    v="$(env_value "$env" TMUX)"; pane="$(env_value "$env" TMUX_PANE)"
+    if [ -n "$v" ] && [ -n "$pane" ]; then
+      printf 'tmux\t%s\t%s\n' "${v%%,*}" "$pane"
+      client="$(read_tmux_clients "${v%%,*}" "$pane" | sort -n | tail -1 | awk '{ print $2 }')"
+      if [ -n "$client" ]; then
+        local outer; outer="$(focus_plan "$client" $((depth + 1)))"
+        if [ -n "$outer" ]; then printf '%s\n' "$outer"; return 0; fi
+      fi
+    fi
+    # Nothing above it (tmux with no client, or started by launchd): the app it was started from
+    v="$(env_value "$env" __CFBundleIdentifier)"
+    if [ -n "$v" ]; then printf 'bundle\t%s\n' "$v"; fi
+    return 0
+  fi
+  tty="$(read_tty "$pid")"
+  case "${app##*/}" in
+    cmux.app)
+      v="$(env_value "$env" CMUX_PANEL_ID)"
+      if [ -n "$v" ]; then
+        printf 'cmux\t%s\t%s\t%s\n' "$app/Contents/Resources/bin/cmux" "$(env_value "$env" CMUX_WORKSPACE_ID | sed 's/^$/-/')" "$v"
+      fi ;;
+    Terminal.app) if [ -n "$tty" ]; then printf 'terminal\t%s\n' "$tty"; fi ;;
+    iTerm.app|iTerm2.app) if [ -n "$tty" ]; then printf 'iterm\t%s\n' "$tty"; fi ;;
+    WezTerm.app)
+      v="$(env_value "$env" WEZTERM_PANE)"
+      if [ -n "$v" ]; then printf 'wezterm\t%s\t%s\n' "$app/Contents/MacOS/wezterm" "$v"; fi ;;
+    kitty.app)
+      v="$(env_value "$env" KITTY_WINDOW_ID)"
+      if [ -n "$v" ] && [ -n "$(env_value "$env" KITTY_LISTEN_ON)" ]; then
+        printf 'kitty\t%s\t%s\t%s\n' "$app/Contents/MacOS/kitty" "$v" "$(env_value "$env" KITTY_LISTEN_ON)"
+      fi ;;
+  esac
+  printf 'app\t%s\n' "$app"
+}
+
+# Selects the Terminal or iTerm2 tab on /dev/<tty>. Prints ok when it did, or denied when macOS
+# hasn't let Lid Agents control that app (it asks the first time). Two scripts, because AppleScript
+# looks an app up when it compiles a script, even in a branch that never runs.
+focus_tab_by_tty() {   # focus_tab_by_tty terminal|iterm <tty>
+  local out
+  if [ "$1" = terminal ]; then
+    out="$(osascript - "/dev/$2" 2>&1 <<'AS'
+on run argv
+  tell application id "com.apple.Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if tty of t is (item 1 of argv) then
+          set selected of t to true
+          set index of w to 1
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end tell
+  return "missing"
+end run
+AS
+)"
+  else
+    out="$(osascript - "/dev/$2" 2>&1 <<'AS'
+on run argv
+  tell application id "com.googlecode.iterm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if tty of s is (item 1 of argv) then
+            tell w to select
+            tell t to select
+            tell s to select
+            return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return "missing"
+end run
+AS
+)"
+  fi
+  case "$out" in ok) echo ok ;; *-1743*|*"Not authorized"*) echo denied ;; *) echo missing ;; esac
+}
+
+# agents focus [--plan] <pid>: bring the agent's terminal or editor to the front, at its own tab
+# or pane where the app has a way in; --plan prints the steps instead
+cmd_focus() {
+  local plan_only=0 pid plan kind a b c tool exact="" shown="" denied=""
+  if [ "${1:-}" = "--plan" ]; then plan_only=1; shift; fi
+  pid="${1:-}"
+  case "$pid" in ''|*[!0-9]*) echo "agents: use agents focus <pid> (agents busy lists them)" >&2; exit 1 ;; esac
+  pid_alive "$pid" || { echo "agents: no process $pid" >&2; exit 1; }
+  plan="$(focus_plan "$pid")"
+  if [ "$plan_only" = 1 ]; then [ -z "$plan" ] || printf '%s\n' "$plan"; return 0; fi
+  [ -n "$plan" ] || { echo "agents: couldn't tell which app is running $pid" >&2; exit 1; }
+  while IFS=$'\t' read -r kind a b c; do
+    case "$kind" in
+      tmux)
+        if tool="$(tool_path tmux)" && "$tool" -S "$a" select-window -t "$b" 2>/dev/null &&
+           "$tool" -S "$a" select-pane -t "$b" 2>/dev/null; then exact="its tmux pane"; fi ;;
+      cmux)
+        [ "$b" = - ] || CMUX_QUIET=1 "$a" select-workspace --workspace "$b" >/dev/null 2>&1
+        # the workspace it started in, else wherever the panel has moved since
+        if { [ "$b" != - ] && CMUX_QUIET=1 "$a" focus-panel --panel "$c" --workspace "$b" >/dev/null 2>&1; } ||
+           CMUX_QUIET=1 "$a" focus-panel --panel "$c" >/dev/null 2>&1; then exact="its tab"; fi ;;
+      terminal|iterm)
+        case "$(focus_tab_by_tty "$kind" "$a")" in
+          ok) exact="its tab" ;;
+          denied) denied="System Settings → Privacy & Security → Automation → Lid Agents" ;;
+        esac ;;
+      wezterm) if "$a" cli activate-pane --pane-id "$b" >/dev/null 2>&1; then exact="its pane"; fi ;;
+      kitty) if "$a" @ --to "$c" focus-window --match "id:$b" >/dev/null 2>&1; then exact="its window"; fi ;;
+      app) if open -a "$a" 2>/dev/null; then shown="$(basename "$a" .app)"; fi ;;
+      bundle) if open -b "$a" 2>/dev/null; then shown="$a"; fi ;;
+    esac
+  done <<< "$plan"
+  [ -n "$shown" ] || { echo "agents: couldn't bring up the app running $pid" >&2; exit 1; }
+  echo "Showing $shown${exact:+, at $exact}."
+  if [ -n "$denied" ]; then echo "  To go straight to the agent's tab, allow it in $denied." >&2; fi
 }
 
 # The agent process at or above <pid>: the hooks pass their shell's parent, which is the agent
@@ -995,6 +1182,7 @@ case "${1:-status}" in
   hotkey)     shift; cmd_hotkey "$@" ;;
   wait)       shift; cmd_wait "$@" ;;
   remote)     shift; cmd_remote "$@" ;;
+  focus)      shift; cmd_focus "$@" ;;
   uninstall)  cmd_uninstall ;;
   update)     cmd_update ;;
   version|--version|-v) echo "lid-agents $AGENTS_VERSION" ;;

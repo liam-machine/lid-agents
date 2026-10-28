@@ -1,0 +1,4 @@
+900698 1 1.0 2-00:00:00 /Applications/cmux.app/Contents/MacOS/cmux
+900699 900698 0.0 01:00:00 /usr/bin/login
+900700 900699 0.0 01:00:00 -/bin/zsh
+900701 900700 3.0 10:00 /Users/me/.local/bin/claude

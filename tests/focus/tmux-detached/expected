@@ -1,0 +1,2 @@
+tmux /private/tmp/tmux-501/default %0
+bundle com.mitchellh.ghostty

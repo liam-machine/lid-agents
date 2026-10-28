@@ -886,17 +886,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         // Which agents are running
         section("Agents")
         if snap.agents.isEmpty { menu.addItem(displayItem(text("None running right now", color: .secondaryLabelColor))) }
-        for agent in snap.agents {
-            let folder = agent.folder.isEmpty ? "" : (agent.folder as NSString).lastPathComponent
-            let symbol: (String, NSColor)? = switch agent.onPhone {
-            case true?: ("iphone", .secondaryLabelColor)
-            case false?: ("exclamationmark.triangle.fill", .systemOrange)
-            case nil: nil
-            }
-            menu.addItem(displayItem(text(folder.isEmpty ? agent.name : "\(agent.name)  \(folder)"), symbol: symbol,
-                                     detail: text(agent.waiting ? "needs you" : "working",
-                                                  color: agent.waiting ? .systemOrange : .secondaryLabelColor)))
-        }
+        for agent in snap.agents { menu.addItem(agentItem(agent)) }
         let offPhone = snap.offPhone.count
         if offPhone > 0 {
             menu.addItem(displayItem(text("Not on your phone: run /remote-control in \(offPhone == 1 ? "that session" : "each of those sessions")",
@@ -908,6 +898,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(.separator())
         info("Lid Agents \(Updater.current)")
         menu.addItem(withTitle: "Quit Lid Agents", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    }
+
+    /// "claude  lid-agents      working": click to go to the agent's terminal or editor (`agents focus`).
+    /// A phone in front of a Claude session on Remote Control, an orange warning if it isn't.
+    func agentItem(_ agent: AgentRow) -> NSMenuItem {
+        let item = NSMenuItem(title: agent.name, action: #selector(focusAgent(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = agent.pid
+        let folder = agent.folder.isEmpty ? "" : (agent.folder as NSString).lastPathComponent
+        let style = NSMutableParagraphStyle()
+        style.tabStops = [NSTextTab(textAlignment: .right, location: 280)]
+        let font = NSFont.menuFont(ofSize: 0)
+        let title = NSMutableAttributedString(string: folder.isEmpty ? agent.name : "\(agent.name)  \(folder)",
+                                              attributes: [.font: font, .paragraphStyle: style])
+        title.append(NSAttributedString(string: "\t" + (agent.waiting ? "needs you" : "working"), attributes: [
+            .font: font, .paragraphStyle: style,
+            .foregroundColor: agent.waiting ? NSColor.systemOrange : NSColor.secondaryLabelColor,
+        ]))
+        item.attributedTitle = title
+        switch agent.onPhone {
+        case true?:
+            item.image = NSImage(systemSymbolName: "iphone", accessibilityDescription: "On Remote Control")
+        case false?:
+            item.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Not on Remote Control")?
+                .withSymbolConfiguration(.init(paletteColors: [.systemOrange]))
+        case nil:
+            item.image = NSImage(size: NSSize(width: 16, height: 16))   // blank, so the names line up
+        }
+        item.toolTip = (agent.folder.isEmpty ? "" : (agent.folder as NSString).abbreviatingWithTildeInPath + "\n")
+            + "Click to go to it"
+        return item
+    }
+
+    @objc func focusAgent(_ sender: NSMenuItem) {
+        guard let pid = sender.representedObject as? Int else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            // The first time for Terminal or iTerm2, macOS asks to let Lid Agents select the tab
+            let result = Agents.run(["focus", String(pid)])
+            guard result.status != 0 else { return }
+            let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                self.notify("Couldn't go to that agent", message.isEmpty ? "It may have just finished." : message)
+            }
+        }
     }
 
     /// A row that only shows something. A plain item that can't be clicked is greyed out, so this

@@ -1,0 +1,3 @@
+tmux /private/tmp/tmux-501/default %3
+iterm ttys009
+app /Applications/iTerm.app

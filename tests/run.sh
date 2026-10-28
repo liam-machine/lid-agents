@@ -187,6 +187,17 @@ check "state --menu: a busy Claude session on Remote Control" "900001 claude wor
 rm "$home/.claude/sessions/900001.json"
 check "state --menu: a session without a file isn't flagged" "900001 claude working -" "$(agent_line "$fx")"
 
+# --- agents focus: the steps for each kind of app (tests/focus/<case>/) ---------------------
+for dir in "$ROOT"/tests/focus/*/; do
+  dir="${dir%/}"
+  check "focus: ${dir##*/}" "$(cat "$dir/expected")" \
+    "$(run_agents "$TMP" "$dir" focus --plan "$(cat "$dir/pid")" | tr '\t' ' ')"
+done
+run_agents "$TMP" "$ROOT/tests/focus/nothing-known" focus 900933 >/dev/null 2>&1; status=$?
+check "focus: says so when it can't tell the app" "1" "$status"
+run_agents "$TMP" "$ROOT/tests/focus/cmux" focus 999999 >/dev/null 2>&1; status=$?
+check "focus: a pid that isn't running" "1" "$status"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]
