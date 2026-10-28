@@ -1,0 +1,5 @@
+900401 1 0.3 30:00 /Users/me/.local/bin/claude
+900402 900401 0.0 01:00 caffeinate
+900403 1 2.0 30:00 /Users/me/.local/bin/codex
+900404 900403 38.0 00:50 cargo
+900405 1 0.1 30:00 /Users/me/.opencode/bin/opencode

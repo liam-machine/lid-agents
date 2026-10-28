@@ -1,0 +1,5 @@
+900001 1 1.2 10:00 /Users/me/.local/bin/claude
+900002 900001 0.0 00:40 caffeinate
+900003 1 0.0 1-02:00:00 /Users/me/.local/bin/claude
+900010 1 2.0 05:00 /Applications/Claude.app/Contents/MacOS/Claude
+900011 900010 0.0 00:30 /usr/bin/caffeinate

@@ -30,9 +30,13 @@ jobs:
 
       - name: Check shell scripts
         run: |
-          bash -n bin/agents install.sh scripts/build.sh
+          bash -n bin/agents install.sh scripts/build.sh tests/run.sh
           brew install shellcheck >/dev/null
           shellcheck -S warning bin/agents install.sh scripts/build.sh
+          shellcheck -S warning -x tests/run.sh
+
+      - name: Tests
+        run: tests/run.sh
 
       - name: Decide version
         id: version

@@ -117,16 +117,35 @@ lid_closed() { ioreg -r -k AppleClamshellState -d 1 | grep -q '"AppleClamshellSt
 
 guard_running() { [ -f "$GUARD_PID" ] && kill -0 "$(cat "$GUARD_PID")" 2>/dev/null; }
 
+# The four things detection reads from the system. tests/run.sh points AGENTS_TEST_FIXTURE at a
+# directory of canned output (procs, args, assertions) so detection can be tested on any Mac.
+read_procs() {
+  if [ -n "${AGENTS_TEST_FIXTURE:-}" ]; then cat "$AGENTS_TEST_FIXTURE/procs"
+  else ps -axo pid=,ppid=,pcpu=,etime=,comm=; fi
+}
+read_args() {   # read_args <pid,pid,...>
+  if [ -n "${AGENTS_TEST_FIXTURE:-}" ]; then awk -v pids=",$1," 'index(pids, "," $1 ",")' "$AGENTS_TEST_FIXTURE/args" 2>/dev/null
+  else ps -ww -o pid=,args= -p "$1" 2>/dev/null; fi
+}
+read_assertions() {
+  if [ -n "${AGENTS_TEST_FIXTURE:-}" ]; then cat "$AGENTS_TEST_FIXTURE/assertions" 2>/dev/null
+  else pmset -g assertions 2>/dev/null; fi
+}
+pid_alive() {
+  if [ -n "${AGENTS_TEST_FIXTURE:-}" ]; then awk -v p="$1" '$1 == p { f = 1 } END { exit !f }' "$AGENTS_TEST_FIXTURE/procs"
+  else kill -0 "$1" 2>/dev/null; fi
+}
+
 # PIDs holding a power assertion that stops idle sleep, one per line. Codex holds one in its
 # own process while a turn runs (`codex features enable prevent_idle_sleep`).
 sleep_assertion_pids() {
-  pmset -g assertions 2>/dev/null | sed -nE \
+  read_assertions | sed -nE \
     's/^[[:space:]]*pid ([0-9]+)\(.*\): \[[^]]*\] [0-9:]+ (PreventUserIdleSystemSleep|PreventSystemSleep|NoIdleSleepAssertion) .*/\1/p'
 }
 
 # Every process: "pid ppid %cpu elapsed-seconds command"
 proc_table() {
-  ps -axo pid=,ppid=,pcpu=,etime=,comm= | awk '{
+  read_procs | awk '{
     t = $4; s = 0; d = 0
     if (index(t, "-")) { split(t, dt, "-"); d = dt[1]; t = dt[2] }
     n = split(t, hms, ":"); for (i = 1; i <= n; i++) s = s * 60 + hms[i]
@@ -155,7 +174,7 @@ waiting_pids() {
     [ -f "$f" ] || continue
     pid="${f##*/}"; pid="${pid#.clear-}"
     case "$pid" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
-    if ! kill -0 "$pid" 2>/dev/null; then rm -f "$f"; continue; fi
+    if ! pid_alive "$pid"; then rm -f "$f"; continue; fi
     case "$f" in */.clear-*) continue ;; esac
     snap="$(sed -n 2p "$f" 2>/dev/null)"
     echo "waiting $pid ${snap:--}"
@@ -190,7 +209,7 @@ agent_report() {
   {
     printf '%s\n' "$procs"
     # Full command lines only for interpreter processes, never every process on the Mac
-    if [ -n "$interp" ]; then ps -ww -o pid=,args= -p "$interp" 2>/dev/null | sed 's/^ */args /'; fi
+    if [ -n "$interp" ]; then read_args "$interp" | sed 's/^ */args /'; fi
     sleep_assertion_pids | sed 's/^/assertion /'
     waiting_pids
   } |
@@ -461,7 +480,7 @@ agent_ancestor() {
     case " $AGENT_NAMES " in *" $name "*) echo "$pid"; return 0 ;; esac
     if printf '%s' "$name" | grep -Eq "$INTERPRETERS"; then
       # same rule as agent_report: process title, else the first non-flag argument
-      if ps -ww -o pid=,args= -p "$pid" 2>/dev/null | awk -v names="$AGENT_NAMES" '
+      if read_args "$pid" | awk -v names="$AGENT_NAMES" '
           BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
           { for (i = 2; i <= NF; i++) { if (i > 2 && $i ~ /^-/) continue; b = $i; sub(/.*\//, "", b)
               if (b in want) { f = 1; exit } ; if (i > 2) exit } }
@@ -953,6 +972,8 @@ cmd_uninstall() {
   fi
 }
 
+# Left unindented so a new command is a one-line change
+main() {
 case "${1:-status}" in
   keep|on)    shift; cmd_keep "$@" ;;
   pause|off)  cmd_pause ;;
@@ -971,3 +992,7 @@ case "${1:-status}" in
   version|--version|-v) echo "lid-agents $AGENTS_VERSION" ;;
   *) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; [ "${1:-}" = "help" ] || [ "${1:-}" = "--help" ] || exit 1 ;;
 esac
+}
+
+# tests/run.sh sources this file for its functions, with AGENTS_SOURCED=1
+[ "${AGENTS_SOURCED:-}" = 1 ] || main "$@"
